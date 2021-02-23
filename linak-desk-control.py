@@ -19,6 +19,8 @@ import time
 
 import usb1
 
+VENDOR_ID = 0x12d3  # Linak
+PRODUCT_ID = 0x0002  # DeskLine CBD Control Box
 
 REQ_INIT = 0x0303
 REQ_GET_STATUS = 0x0304
@@ -63,10 +65,10 @@ class Status(object):
         self = cls()
         attr = ['positionLost', 'antiColision', 'overloadDown', 'overloadUp']
         bitlist = '{:0>8s}'.format(bin(int(buf, base=16)).lstrip('0b'))
-        for i in range(0, 4):
-            setattr(self, attr[i], True if bitlist[i] == '1' else False)
+        for index, attr_name in enumerate(attr):
+            setattr(self, attr_name, bitlist[index] == '1')
         # set unknown
-        self.unkown = int(buf[1:], 16)
+        self.unknown = int(buf[1:], 16)
 
         return self
 
@@ -123,9 +125,8 @@ class ValidFlags(object):
                 'ID06_Ref7_pos_stat_speed',
                 'ID07_Ref8_pos_stat_speed',
                 'unknown']
-        bitlist = '{:0>16s}'.format(bin(int(buf, base=16)).lstrip('0b'))
-        for i in range(0, len(bitlist)):
-            setattr(self, attr[i], True if bitlist[i] == '1' else False)
+        for idx, bit in enumerate(bin(int(buf, base=16))[2:].zfill(16)):
+            setattr(self, attr[idx], bit == '1')
 
         return self
 
@@ -184,14 +185,12 @@ class LinakController(object):
     _handle = None
     _ctx = None
 
-    def __init__(self, vendor_id=0x12d3, product_id=0x0002):
+    def __init__(self):
         self._ctx = usb1.USBContext()
         # self._ctx.setDebug(4)
-        self._handle = self._ctx.openByVendorIDAndProductID(
-            vendor_id,
-            product_id,
-            skip_on_error=True,
-        )
+        self._handle = self._ctx.openByVendorIDAndProductID(VENDOR_ID,
+                                                            PRODUCT_ID,
+                                                            skip_on_error=True)
         if not self._handle:
             raise Exception('Could not connect to usb device')
 
@@ -202,11 +201,11 @@ class LinakController(object):
         if self._handle:
             self._handle.releaseInterface(0)
 
-        del(self._handle)
-        del(self._ctx)
+        del self._handle
+        del self._ctx
 
     def _control_write_read(self, request_type, request, value, index, data,
-                          timeout=0):
+                            timeout=0):
         data, data_buffer = usb1.create_initialised_buffer(data)
         transferred = self._handle._controlTransfer(request_type, request,
                                                     value, index, data,
@@ -215,15 +214,15 @@ class LinakController(object):
         return transferred, data_buffer[:transferred]
 
     def _get_status_report(self):
-        buf = bytearray(b'\x00'*LEN_STATUS_REPORT)
+        buf = bytearray(b'\x00' * LEN_STATUS_REPORT)
         buf[0] = CMD_STATUS_REPORT
         # print('> {:s}'.format(buf.hex()))
         _, buf = self._control_write_read(TYPE_GET_CI,
-                                        HID_REPORT_GET,
-                                        REQ_GET_STATUS,
-                                        0,
-                                        buf,
-                                        LINAK_TIMEOUT)
+                                          HID_REPORT_GET,
+                                          REQ_GET_STATUS,
+                                          0,
+                                          buf,
+                                          LINAK_TIMEOUT)
 
         # check if the response match to request!
         if buf[0] != CMD_STATUS_REPORT:
@@ -238,16 +237,14 @@ class LinakController(object):
         buf[2] = 0
         buf[3] = 251
 
-        x, buf = self._control_write_read(
-            TYPE_SET_CI,
-            HID_REPORT_SET,
-            REQ_INIT,
-            0,
-            buf,
-            LINAK_TIMEOUT
-        )
+        amount, buf = self._control_write_read(TYPE_SET_CI,
+                                               HID_REPORT_SET,
+                                               REQ_INIT,
+                                               0,
+                                               buf,
+                                               LINAK_TIMEOUT)
 
-        if x != LEN_STATUS_REPORT:
+        if amount != LEN_STATUS_REPORT:
             raise Exception('Device is not ready yet. Initialization failed '
                             'in step 1.')
 
@@ -268,15 +265,13 @@ class LinakController(object):
         buf[7] = hHigh
         buf[8] = hLow
 
-        x, buf = self._control_write_read(
-            TYPE_SET_CI,
-            HID_REPORT_SET,
-            REQ_MOVE,
-            0,
-            buf,
-            LINAK_TIMEOUT
-        )
-        return x == LEN_STATUS_REPORT
+        amount, buf = self._control_write_read(TYPE_SET_CI,
+                                               HID_REPORT_SET,
+                                               REQ_MOVE,
+                                               0,
+                                               buf,
+                                               LINAK_TIMEOUT)
+        return amount == LEN_STATUS_REPORT
 
     def _move_down(self):
         return self._move(HEIGHT_MOVE_DOWNWARDS)
@@ -305,30 +300,31 @@ class LinakController(object):
             print('Device not ready!')
 
         self._set_status_report()
-        time.sleep(1000/1000000.0)
-        if not _move_end():
+        time.sleep(0.001)
+        if not self._move_end():
             raise Exception('Device not ready - initialization failed on step '
                             '2 (move_end)')
 
-        time.sleep(100000/1000000.0)
+        time.sleep(0.1)
 
     def move(self, target):
-        a = max_a = 3
+        retry_count = max_retry = 3
         epsilon = 13
-        oldH = 0
+        prev_height = 0
 
         while True:
             self._move(target)
-            time.sleep(200000/1000000.0)
+            time.sleep(0.2)
 
             buf = self._get_status_report()
             r = StatusReport.from_buf(buf)
             distance = r.ref1cnt - r.ref1.pos
-            delta = oldH-r.ref1.pos
-            if abs(distance) <= epsilon or abs(delta) <= epsilon or oldH == r.ref1.pos:
-                a -= 1
+            delta = abs(prev_height - r.ref1.pos)
+            if (abs(distance) <= epsilon or delta <= epsilon or
+                    prev_height == r.ref1.pos):
+                retry_count -= 1
             else:
-                a = max_a
+                retry_count = max_retry
 
             print(
                 'Current height: {:d}; target height: {:d}; distance: {:d}'.format(
@@ -338,9 +334,10 @@ class LinakController(object):
                 )
             )
 
-            if a == 0:
+            if retry_count == 0:
                 break
-            oldH = r.ref1.pos
+
+            prev_height = r.ref1.pos
 
         return abs(r.ref1.pos - target) <= epsilon
 
