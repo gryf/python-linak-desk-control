@@ -14,6 +14,7 @@
 
 import argparse
 import ctypes
+import logging
 import sys
 import time
 
@@ -51,6 +52,55 @@ LINAK_TIMEOUT = 1000
 HEIGHT_MOVE_DOWNWARDS = 32767
 HEIGHT_MOVE_UPWARDS = 32768
 HEIGHT_MOVE_END = 32769
+
+
+class Logger:
+    """
+    Simple logger class with output on console only
+    """
+    def __init__(self, logger_name):
+        """
+        Initialize named logger
+        """
+        self._log = logging.getLogger(logger_name)
+        self.setup_logger()
+        self._log.set_verbose = self.set_verbose
+
+    def __call__(self):
+        """
+        Calling this object will return configured logging.Logger object with
+        additional set_verbose() method.
+        """
+        return self._log
+
+    def set_verbose(self, verbose_level):
+        """
+        Change verbosity level. Default level is warning.
+        """
+        ver_map = {0: logging.CRITICAL,
+                   1: logging.ERROR,
+                   2: logging.WARNING,
+                   3: logging.INFO,
+                   4: logging.DEBUG}
+        self._log.setLevel(ver_map.get(verbose_level, ver_map[4]))
+
+    def setup_logger(self):
+        """
+        Create setup instance and make output meaningful :)
+        """
+        if self._log.handlers:
+            # need only one handler
+            return
+
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.set_name("console")
+        console_formatter = logging.Formatter("%(levelname)s: %(message)s")
+        console_handler.setFormatter(console_formatter)
+        self._log.addHandler(console_handler)
+        self._log.setLevel(logging.WARNING)
+
+
+LOG = Logger(__name__)()
 
 
 class Status(object):
@@ -297,7 +347,7 @@ class LinakController(object):
         if not self._is_status_report_not_ready(buf):
             return
         else:
-            print('Device not ready!')
+            LOG.error('Device not ready!')
 
         self._set_status_report()
         time.sleep(0.001)
@@ -326,13 +376,8 @@ class LinakController(object):
             else:
                 retry_count = max_retry
 
-            print(
-                'Current height: {:d}; target height: {:d}; distance: {:d}'.format(
-                    r.ref1.pos,
-                    target,
-                    distance
-                )
-            )
+            LOG.info('Current height: %s; target height: %s; '
+                     'distance: %s', r.ref1.pos, target, distance)
 
             if retry_count == 0:
                 break
@@ -349,27 +394,34 @@ class LinakController(object):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Get the control on your desk!')
-    parser.add_argument('command', choices=['move', 'height'], help='Command to execute.')
-    parser.add_argument('height', type=int, nargs='?', help='For command "move", give the destination height.')
+    parser = argparse.ArgumentParser(description='Get the control on your '
+                                     'desk!')
+    subparsers = parser.add_subparsers(help='supported commands',
+                                       dest='subcommand')
+    subparsers.required = True
+    parser_status = subparsers.add_parser('status', help='Get status of the '
+                                          'device')
+    parser_move = subparsers.add_parser('move', help='Move to the desired '
+                                        'height')
+    parser_move.add_argument('height', type=int)
+    parser.add_argument("-v", "--verbose", help='be verbose. Adding more "v" '
+                        'will increase verbosity', action="count", default=0)
 
     args = parser.parse_args()
-    if args.command == 'move' and not args.height:
-        sys.stderr.write('Height missing in case of move!\n')
-        parser.print_help()
-        sys.exit(1)
+
+    LOG.set_verbose(args.verbose)
 
     co = LinakController()
     try:
-        if args.command == 'move':
+        if args.subcommand == 'move':
             r = co.move(args.height)
             if r:
-                print('Command executed successfuly')
+                LOG.info('Command executed successfuly')
             else:
-                print('Command failed')
-        elif args.command == 'height':
+                LOG.error('Command failed')
+        elif args.subcommand == 'status':
             h, hcm = co.get_height()
-            print('Current height is: {:d} / {:.2f} cm'.format(h, hcm))
+            LOG.info('Current height is: %s / %.2fcm', h, hcm)
     except Exception as e:
         co.close()
         raise e
